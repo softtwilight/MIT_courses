@@ -60,7 +60,7 @@ func ConcurrentMutex(url string, fetcher Fetcher, f * fetchState) {
 
 
 Use channel to concurrent
-```
+```go
 func worker(url string, ch chan []string, fetch Fetcher) {
 	urls, err := fetcher.Fetch(url)
 	if err != nil {
