@@ -1,18 +1,65 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
-
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+	"time"
+)
 
 type Master struct {
-	// Your definitions here.
-
+	S  *JobState
+	TP *TaskPool
+	W  *sync.Map
 }
 
-// Your code here -- RPC handlers for the worker to call.
+type JobState struct {
+	MatrixSource [][]string
+	MC           int
+	RC           int
+	MCDone       int32
+	nextWorkerID uint64
+	allDone      int
+}
+type TaskPool struct {
+	Pool chan *Task
+}
+type Task struct {
+	Status int
+	Type   int
+	Conf   *TaskConf
+}
+
+type TaskConf struct {
+	Source []string
+	RNum   int
+	MNum   int
+	RC     int
+}
+
+type Dispatcher struct {
+	TimeOut          time.Duration
+	M                *Master
+	ReduceSourceChan chan *ReduceSource
+	CleanWorkerChan  chan uint64
+}
+
+type WokerSession struct {
+	WorkerID     uint64
+	Status       int
+	T            *Task
+	Mux          *sync.RWMutex
+	LastPingTs   int64
+	PingPongChan chan struct{}
+}
+
+type ReduceSource struct {
+	MIdx      int
+	MapSource []string
+}
 
 //
 // an example RPC handler.
@@ -20,10 +67,14 @@ type Master struct {
 // the RPC argument and reply types are defined in rpc.go.
 //
 func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+
 	return nil
 }
 
+func (m *Master) JobDispatch(args *JobArgs, reply *JobReply) error {
+
+	return nil
+}
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -46,11 +97,8 @@ func (m *Master) server() {
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
-	ret := false
-
+	ret := m.nReduce == m.completedTask
 	// Your code here.
-
-
 	return ret
 }
 
@@ -60,10 +108,14 @@ func (m *Master) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{}
+	m := Master{
+		files:         files,
+		nReduce:       nReduce,
+		completedTask: 0,
+	}
+	m.status = make([]int, len(files))
 
 	// Your code here.
-
 
 	m.server()
 	return &m

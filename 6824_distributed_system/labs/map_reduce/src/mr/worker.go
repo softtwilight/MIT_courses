@@ -1,6 +1,12 @@
 package mr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"sort"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
@@ -24,6 +30,12 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // main/mrworker.go calls this function.
@@ -34,7 +46,30 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 
 	// uncomment to send the Example RPC to the master.
-	// CallExample()
+	reply := CallExample()
+	filename := reply.fileName
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Fatalf("cannot open %v", filename)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", filename)
+	}
+	file.Close()
+
+	kva := mapf(filename, string(content))
+	sort.Sort(ByKey(kva))
+
+	enc := json.NewEncoder(file)
+	for _, kv := range kva {
+		err := enc.Encode(&kv)
+		reduceTaskNum := ihash(kv.Key) % reply.nReduce
+		oname := fmt.Sprintf("mr-%d-%d", reply.mapTaskNum, reduceTaskNum)
+		ofile, _ := os.Create(oname)
+		fmt.Fprintf(ofile, "%v\n", err)
+	}
+
 
 }
 
@@ -43,13 +78,13 @@ func Worker(mapf func(string, string) []KeyValue,
 //
 // the RPC argument and reply types are defined in rpc.go.
 //
-func CallExample() {
+func CallExample() *ExampleReply{
 
 	// declare an argument structure.
 	args := ExampleArgs{}
 
 	// fill in the argument(s).
-	args.X = 99
+	args.X = 0
 
 	// declare a reply structure.
 	reply := ExampleReply{}
@@ -58,7 +93,25 @@ func CallExample() {
 	call("Master.Example", &args, &reply)
 
 	// reply.Y should be 100.
-	fmt.Printf("reply.Y %v\n", reply.Y)
+	fmt.Printf("reply.fileName %v\n", reply.fileName)
+	return &reply
+}
+
+func CallAskAJob() *JobReply{
+
+	// declare an argument structure.
+	args := JobArgs{}
+
+
+	// declare a reply structure.
+	reply := JobReply{}
+
+	// send the RPC request, wait for the reply.
+	call("Master.JobDispatch", &args, &reply)
+
+	// reply.Y should be 100.
+	//fmt.Printf("reply.fileName %v\n", reply.fileName)
+	return &reply
 }
 
 //
