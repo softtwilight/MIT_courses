@@ -7,8 +7,11 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+var dispatcher *Dispatcher
 
 type Master struct {
 	S  *JobState
@@ -61,19 +64,77 @@ type ReduceSource struct {
 	MapSource []string
 }
 
-//
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
+func (m *Master) RegisterWorker(args *RegisterReg, reply *RegisterRes) error {
+	_ = args
+	for {
+		assignID := atomic.LoadUint64(&m.S.nextWorkerID)
+		if atomic.CompareAndSwapUint64(&m.S.nextWorkerID, assignID, assignID+1) {
+			reply.WorkerID = assignID
+			ws := &WokerSession{
+				WorkerID:     assignID,
+				Status:       0, // 0 for good, 1 for lost
+				T:            nil,
+				LastPingTs:   time.Now().UnixNano() / 1e6,
+				Mux:          &sync.RWMutex{},
+				PingPongChan: make(chan struct{}),
+			}
+			m.W.Store(assignID, ws)
+			go ws.PingPong(dispatcher.TimeOut)
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
 
+	}
+}
+
+func (m *Master) GetTaskWorker(args *GetTaskReq, reply *GetTaskRes) error {
+	c := time.After(5 * time.Second)
+	if worker, ok := m.W.Load(args.WorkerID); ok {
+		w := worker.(*WokerSession)
+		select {
+		case task, ok := <-m.TP.Pool:
+			if !ok {
+				shutdown(reply)
+				m.W.Delete(w.WorkerId)
+				return nil
+			}
+			task.Status = 1
+			reply.T = task
+			w.Mux.Lock()
+			defer w.Mux.Unlock()
+			w.Status = 1
+			w.T = task
+
+		case <-c:
+		}
+	} else {
+		shutdown(reply)
+		m.W.Delete(args.WorkerId)
+	}
 	return nil
 }
 
-func (m *Master) JobDispatch(args *JobArgs, reply *JobReply) error {
-
+func (m *Master) PingPong(args *Ping, reply *Pong) error {
+	if ws, ok := m.W.Load(args.WorkerID); ok {
+		w := ws.(*WokerSession)
+		w.Mux.Lock()
+		defer w.Mux.Unlock()
+		w.LastPingTs = time.Now().UnixNano() / 1e6
+		w.PingPongChan <- struct{}{}
+	}
+	reply.Code = 0
 	return nil
+}
+
+func shutdown(reply *GetTaskRes) {
+	reply.Msg = "shut down."
+	reply.T = &Task{
+		Status: 0,
+		Type:   2,
+		Conf: &TaskConf{
+			Source: []string{},
+		},
+	}
 }
 
 //

@@ -27,7 +27,7 @@ type ExampleReply struct {
 type RegisterReq struct {
 }
 
-type ResisterRes struct {
+type RegisterRes struct {
 	WorkerID uint64
 }
 
