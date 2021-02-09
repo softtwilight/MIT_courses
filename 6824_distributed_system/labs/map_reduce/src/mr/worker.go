@@ -1,16 +1,13 @@
 package mr
 
 import (
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"hash/fnv"
+	"log"
+	"net/rpc"
 	"os"
-	"sort"
+	"time"
 )
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
 
 //
 // Map functions return a slice of KeyValue.
@@ -37,81 +34,90 @@ func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
+var workerID uint64
+
+const (
+	CallRegister = "Master.RegisterWorker"
+	CallPingPong = "Master.PingPong"
+	CallGetTask  = "Master.GetTaskWorker"
+	CallReport   = "Master.ReportResult"
+)
+
 //
 // main/mrworker.go calls this function.
 //
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-
 	// Your worker implementation here.
+	workerID = Register()
+	go func() {
+		tc := time.NewTicker(10 * time.Second)
+		defer tc.Stop()
+		for {
+			<-tc.C
+			// send heart bit
+			PingPong()
+		}
+	}()
 
-	// uncomment to send the Example RPC to the master.
-	reply := CallExample()
-	filename := reply.fileName
-	file, err := os.Open(filename)
-	if err != nil {
-		log.Fatalf("cannot open %v", filename)
+	var task *Task
+	for {
+		task = GetTask()
+		res, err := DispatchTask(mapf, reducef, task)
+		if err != nil {
+			continue
+		}
+		Report(res)
 	}
-	content, err := ioutil.ReadAll(file)
-	if err != nil {
-		log.Fatalf("cannot read %v", filename)
-	}
-	file.Close()
-
-	kva := mapf(filename, string(content))
-	sort.Sort(ByKey(kva))
-
-	enc := json.NewEncoder(file)
-	for _, kv := range kva {
-		err := enc.Encode(&kv)
-		reduceTaskNum := ihash(kv.Key) % reply.nReduce
-		oname := fmt.Sprintf("mr-%d-%d", reply.mapTaskNum, reduceTaskNum)
-		ofile, _ := os.Create(oname)
-		fmt.Fprintf(ofile, "%v\n", err)
-	}
-
-
 }
 
-//
-// example function to show how to make an RPC call to the master.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func CallExample() *ExampleReply{
-
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 0
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	call("Master.Example", &args, &reply)
-
-	// reply.Y should be 100.
-	fmt.Printf("reply.fileName %v\n", reply.fileName)
-	return &reply
+func Register() uint64 {
+	args, reply = RegisterReq{}, RegisterRes{}
+	call(CallRegister, &args, &reply)
+	return reply.WorkerID
 }
 
-func CallAskAJob() *JobReply{
+func PingPong() {
+	args, reply := Ping{WorkerID: workerID}, Pong{}
+	call(CallPingPong, &args, &reply)
+}
 
-	// declare an argument structure.
-	args := JobArgs{}
+func GetTask() *Task {
+	args, reply := GetTaskReq{WorkerID: workerID}, GetTaskRes{}
+	call(CallGetTask, &args, &reply)
+	return reply.T
+}
 
+func Report(res *ResultReq) {
+	reply := &ResultRes{}
+	call(CallReport, res, reply)
+}
 
-	// declare a reply structure.
-	reply := JobReply{}
+func DispatchTask(mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string, task *Task) (*ResultReq, error) {
 
-	// send the RPC request, wait for the reply.
-	call("Master.JobDispatch", &args, &reply)
+	if task == nil {
+		return nil, fmt.Errorf("retry")
+	}
 
-	// reply.Y should be 100.
-	//fmt.Printf("reply.fileName %v\n", reply.fileName)
-	return &reply
+	var res []string
+	req := &ResultReq{WorkerId: workerID}
+
+	if task.Type == 0 {
+		res, _ = doMap(mapf, task)
+		req.Code = 0
+	} else if task.Type == 1 {
+		res, _ = doReduce(reducef, task)
+		req.Code = 1
+	} else if task.Type == 2 {
+		os.Exit(0)
+	}
+	if len(res) == 0 {
+		return nil, fmt.Errorf("retry")
+	}
+	req.M = res
+	return req, nil
+
 }
 
 //
