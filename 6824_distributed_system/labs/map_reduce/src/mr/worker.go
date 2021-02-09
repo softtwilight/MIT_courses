@@ -3,9 +3,11 @@ package mr
 import (
 	"fmt"
 	"hash/fnv"
+	"io/ioutil"
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 	"time"
 )
 
@@ -37,10 +39,11 @@ func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 var workerID uint64
 
 const (
-	CallRegister = "Master.RegisterWorker"
-	CallPingPong = "Master.PingPong"
-	CallGetTask  = "Master.GetTaskWorker"
-	CallReport   = "Master.ReportResult"
+	CallRegister   = "Master.RegisterWorker"
+	CallPingPong   = "Master.PingPong"
+	CallGetTask    = "Master.GetTaskWorker"
+	CallReport     = "Master.ReportResult"
+	MapOutfileName = "mr-worker-%d-%d.out"
 )
 
 //
@@ -118,6 +121,48 @@ func DispatchTask(mapf func(string, string) []KeyValue,
 	req.M = res
 	return req, nil
 
+}
+
+func doMap(mapf func(string, string) []KeyValue, task *Task) ([]string, error) {
+	res := make([]string, 0)
+	fileName := task.Conf.Source[0]
+	file, err := os.Open(fileName)
+	defer file.Close()
+	if err != nil {
+		return nil, fmt.Errorf("MapTask Open file err : %s", err.Error())
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("readAll error")
+	}
+
+	cacheMap := make(map[string][]KeyValue, 0)
+	for i := 0; i < task.Conf.RC; i++ {
+		key := fmt.Sprintf(MapOutfileName, task.Conf.MNum, i)
+		cacheMap[key] = []KeyValue{}
+		res = append(res, key)
+	}
+
+	kva := mapf(fileName, string(content))
+	for i := 0; i < len(kva); i++ {
+		idx := ihash(kva[i].Key) % task.Conf.RC
+		key := fmt.Sprintf(MapOutfileName, task.Conf.MNu, idx)
+		cacheMap[key] = append(cacheMap[key], kva[i])
+	}
+
+	for key, value := range cacheMap {
+		WriteInterFile(key, value)
+	}
+	return res, nil
+}
+
+func WriteInterFile(fileName string, value []KeyValue) {
+	sort.Sort(ByKey(value))
+	outFile, _ := os.Create(fileName)
+	defer outFile.Close()
+	for i := 0; i < len(value); i++ {
+		_, _ = fmt.Fprintf(outFile, "%v %v\n", value[i].Key, value[i].Value)
+	}
 }
 
 //
