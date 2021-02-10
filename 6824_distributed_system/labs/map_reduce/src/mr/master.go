@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -14,9 +15,9 @@ import (
 var dispatcher *Dispatcher
 
 type Master struct {
-	S  *JobState
-	TP *TaskPool
-	W  *sync.Map
+	S *JobState
+	T *TaskPool
+	W *sync.Map
 }
 
 type JobState struct {
@@ -135,6 +136,60 @@ func shutdown(reply *GetTaskRes) {
 			Source: []string{},
 		},
 	}
+}
+
+func (m *Master) ReportResult(args *ResultReq, reply *ResultRes) error {
+
+	if len(args.M) == 0 {
+		reply.code = 1
+		reply.Msg = "The report cannot be empty"
+		return nil
+	}
+
+	if ws, ok := m.W.Load(args.WorkerID); ok {
+		w := ws.(*WokerSession)
+		switch args.Code {
+		case 0:
+			if w.T == nil {
+				reply.Msg = "shut down!"
+				reply.Code = 1
+				return nil
+			}
+			dispatcher.ReduceSourceChan <- &ReduceSource{
+				MIdx:      w.T.Conf.MNum,
+				MapSource: args.M,
+			}
+		case 1:
+			if w.T == nil {
+				reply.Msg = "shut down!"
+				reply.Code = 1
+				return nil
+			}
+			m.S.MatrixSource[m.S.MC][w.T.Conf.RNum] = "done"
+		case 2:
+			task := w.T
+			m.W.Delete(args.WorkerId)
+			task.Status = 0
+			m.T.Pool <- task
+			reply.Code = 0
+			return nil
+		default:
+			reply.Code = 1
+			reply.Msg = fmt.Sprintf("Unkown code: %d", args.code)
+			return nil
+		}
+		w.Mux.Lock()
+		defer w.Mux.Unlock()
+		w.Status = 0
+		w.T = nil
+		w.LastPingTs = time.Now().UnixNano() / 1e6
+		reply.code = 0
+		return nil
+	}
+	reply.Code = 1
+	reply.Msg = "unregistered"
+	return nil
+
 }
 
 //
