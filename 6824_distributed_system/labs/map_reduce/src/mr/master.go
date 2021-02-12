@@ -192,6 +192,56 @@ func (m *Master) ReportResult(args *ResultReq, reply *ResultRes) error {
 
 }
 
+func (d *Dispatcher) cleanSession() {
+	for workId := range d.CleanWorkerChan {
+		if w, ok := d.M.W.Load(workId); ok {
+			worker := w.(*WokerSession)
+			worker.Mux.Lock()
+			task := worker.T
+			worker.T = nil
+			worker.Mux.Unlock()
+			if task != nil {
+				task.Status = 0
+				d.M.T.Pool <- task
+			}
+			d.M.W.Delete(worker)
+		}
+	}
+}
+
+func (d *Dispatcher) updateJobState() {
+
+	for rs := range d.ReduceSourceChan {
+		d.M.S.MatrixSource[rs.MIdx] = rs.MapSource
+		atomic.AddInt32(&d.M.S.MCDone, 1)
+		if atomic.LoadInt32(&d.M.S.MCDone) == int32(d.M.S.MC) {
+			for j := 0; j < d.M.S.RC; j++ {
+				sources := make([]string, 0)
+				for i := 0; i < d.M.S.MC; i++ {
+					sources = append(sources, d.M.S.MatrixSource[i][j])
+				}
+
+				d.M.T.Pool <- &Task{
+					Status: 0,
+					Type:   1, // for reduce
+					Conf: &TaskConf{
+						Source: sources,
+						RNum:   j,
+						MNum:   -1,
+						RC:     d.M.S.RC,
+					},
+				}
+				d.M.S.MatrixSource[d.M.S.MC][j] = "created"
+			}
+		}
+	}
+}
+
+func (d *Dispatcher) run() {
+	go d.cleanSession()
+	go d.updateJobState()
+}
+
 //
 // start a thread that listens for RPCs from worker.go
 //
@@ -213,9 +263,35 @@ func (m *Master) server() {
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
-	ret := m.nReduce == m.completedTask
-	// Your code here.
-	return ret
+	res := false
+	count := 0
+	for _, v := range m.S.MatrixSource[m.S.MC] {
+		if v == "done" {
+			count++
+		}
+	}
+	if count == m.S.RC {
+		if len(m.T.Pool) != 0 {
+			return false
+		}
+		if m.S.allDone == 0 {
+			close(m.T.Pool)
+			m.S.allDone = 1
+		}
+		c := 0
+		m.W.Range(func(key, value interface{}) bool {
+			w := value.(*WokerSession)
+			if w.T != nil {
+				c++
+			}
+			return true
+		})
+		if c == 0 {
+			res = true
+		}
+	}
+
+	return res
 }
 
 //
@@ -224,15 +300,40 @@ func (m *Master) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{
-		files:         files,
-		nReduce:       nReduce,
-		completedTask: 0,
+	m := Master{}
+
+	sources := make([][]string, len(files)+1)
+	for i := 0; i < len(sources); i++ {
+		sources[i] = make([]string, nReduce)
 	}
-	m.status = make([]int, len(files))
+	m.S = &JobState{
+		MatrixSource: sources,
+		MC:           len(files),
+		RC:           nReduce,
+		nextWorkerID: uint64(0),
+	}
 
-	// Your code here.
-
+	m.T = &TaskPool{Pool: make(chan *Task, len(files))}
+	m.W = &sync.Map{}
+	dispatcher = &Dispatcher{
+		TimeOut:          10 * time.Second,
+		M:                &m,
+		ReduceSourceChan: make(chan *ReduceSource, nReduce),
+		CleanWorkerChan:  make(chan uint64, len(files)),
+	}
+	dispatcher.run()
+	for i, file := range files {
+		m.T.Pool <- &Task{
+			Status: 0,
+			Type:   0,
+			Conf: &TaskConf{
+				Source: []string{file},
+				MNum:   i,
+				RNum:   -1,
+				RC:     nReduce,
+			},
+		}
+	}
 	m.server()
 	return &m
 }
